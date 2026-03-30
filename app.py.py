@@ -1,114 +1,110 @@
 import streamlit as st
 import pandas as pd
-import datetime
 
-# --- НАСТРОЙКИ ---
-st.set_page_config(page_title="USA Car Calc", page_icon="🚢", layout="wide")
-
+# 1. Загрузка данных с учетом твоих названий на GitHub
 @st.cache_data
 def load_all_data():
     try:
-        df_tow = pd.read_csv('TOW.csv')
-        # Читаем Freight как текст, чтобы проще искать блоки (Constanta, Odesa...)
-        with open('Freight1.csv', 'r', encoding='utf-8') as f:
-            freight_lines = [line.strip().split(',') for line in f.readlines()]
-        return df_tow, freight_lines
-    except Exception as e:
-        st.error(f"Ошибка загрузки файлов: {e}")
-        return pd.DataFrame(), []
-
-df_tow, freight_raw = load_all_data()
-
-# --- ФУНКЦИЯ ПОИСКА МОРЯ (FREIGHT) ---
-def get_ocean_cost(dest_port, us_port, fuel_type, raw_data):
-    # Упрощенный поиск по строкам файла Freight1.csv
-    try:
-        start_row = -1
-        # Ищем начало блока порта (напр. "Odesa")
-        for i, line in enumerate(raw_data):
-            if dest_port.lower() in line[0].lower():
-                start_row = i
-                break
-        
-        if start_row == -1: return 0
-        
-        # Определяем индекс колонки порта США (NJ, GA, TX...)
-        header = raw_data[start_row]
-        col_idx = -1
-        for j, h in enumerate(header):
-            if us_port.upper() in h.upper():
-                col_idx = j
-                break
-        
-        if col_idx == -1: return 0
-
-        # Ищем строку с типом топлива ниже заголовка
-        for k in range(start_row + 1, start_row + 15):
-            if fuel_type.upper() in raw_data[k][0].upper():
-                val = raw_data[k][col_idx]
-                return float(val) if val and val != 'Error' else 0
+        # Пытаемся прочитать файлы с двойным расширением, как на твоем скрине
+        df_tow = pd.read_csv('TOW.csv.csv')
+        df_freight = pd.read_csv('Freight1.csv.csv', header=None)
+        return df_tow, df_freight
     except:
-        return 0
-    return 0
+        try:
+            # Если переименуешь обратно, этот блок сработает для обычных названий
+            df_tow = pd.read_csv('TOW.csv')
+            df_freight = pd.read_csv('Freight1.csv', header=None)
+            return df_tow, df_freight
+        except Exception as e:
+            st.error(f"Файлы не найдены! Проверь названия на GitHub. Ошибка: {e}")
+            return pd.DataFrame(), pd.DataFrame()
+
+df_tow, df_freight = load_all_data()
+
+# 2. Улучшенная логика поиска моря
+def get_ocean_fee(dest, us_port, fuel, is_suv, df):
+    try:
+        # Находим строку с портом (Odesa, Constanta и т.д.)
+        start_idx = df[df[0].str.contains(dest, case=False, na=False)].index[0]
+        header_row = df.iloc[start_idx].tolist()
+        
+        # Ищем колонку порта США
+        col_idx = -1
+        for i, val in enumerate(header_row):
+            if str(val).strip().upper() == us_port.strip().upper():
+                col_idx = i
+                break
+        
+        if col_idx == -1: return None
+
+        # Формируем ключ для поиска (GAS, GAS SUV, EV и т.д.)
+        search_term = fuel.strip().upper()
+        if is_suv:
+            search_term = f"{search_term} SUV"
+
+        # Ищем значение в строках ниже порта
+        for k in range(start_idx + 1, start_idx + 20):
+            row_label = str(df.iloc[k, 0]).strip().upper()
+            if search_term == row_label or (not is_suv and search_term in row_label):
+                price = df.iloc[k, col_idx]
+                if pd.isna(price) or str(price).strip() == '' or 'ERROR' in str(price).upper():
+                    continue # Ищем дальше, если пустая ячейка
+                return float(str(price).replace('$', '').replace(',', ''))
+    except:
+        return None
+    return None
 
 # --- ИНТЕРФЕЙС ---
-st.title("🚗 Калькулятор авто из США (Full Data Sync)")
+st.set_page_config(page_title="USA Car Calc", layout="wide")
+st.title("🏎️ Калькулятор доставки из США")
 
 with st.sidebar:
-    st.header("📋 Параметры")
-    bid = st.number_input("Ставка ($)", value=8000, step=500)
+    st.header("Настройки")
+    bid = st.number_input("Ставка на аукционе $", value=5000)
+    
+    # Выбор кузова (Легковая или Кроссовер)
+    car_body = st.radio("Тип кузова", ["Легковая (Седан/Хэтч)", "Кроссовер (SUV/Внедорожник)"])
+    is_suv = True if "Кроссовер" in car_body else False
     
     if not df_tow.empty:
-        loc = st.selectbox("Локация аукциона", sorted(df_tow['Loaction'].unique()))
-    else:
-        loc = st.text_input("Локация")
-        
-    dest = st.selectbox("Порт назначения", ["Constanta", "Odesa", "Klaipeda"])
+        loc = st.selectbox("Локация (Город)", sorted(df_tow['Loaction'].unique()))
     
-    # Сопоставляем типы топлива с названиями в твоем Freight1.csv
-    fuel_map = {"Бензин": "GAS", "Дизель": "DIESEL", "Электро": "EV", "Гибрид": "HYB"}
-    fuel_ui = st.selectbox("Тип топлива", list(fuel_map.keys()))
-    fuel_code = fuel_map[fuel_ui]
-    
-    car_year = st.number_input("Год", 2010, 2025, 2020)
-    engine = st.number_input("Объем (см³)", 500, 6000, 2000)
+    dest = st.selectbox("Порт назначения", ["Odesa", "Constanta", "Klaipeda"])
+    fuel = st.selectbox("Топливо", ["GAS", "EV", "HYB", "DIESEL"])
 
-# --- РАСЧЕТ ---
-# 1. Суша и выбор порта США
-inland_cost = 0
-best_us_port = "NJ" # По умолчанию
+# РАСЧЕТЫ
+inland = 0
+us_port = "NJ"
 if not df_tow.empty and loc:
     row = df_tow[df_tow['Loaction'] == loc].iloc[0]
     prices = {'NJ': row['NJ'], 'GA': row['GA'], 'TX': row['TX'], 'CA': row['CA'], 'WA': row['WA']}
     valid = {k: float(v) for k, v in prices.items() if str(v).replace('.','',1).isdigit()}
     if valid:
-        best_us_port = min(valid, key=valid.get)
-        inland_cost = valid[best_us_port]
+        us_port = min(valid, key=valid.get)
+        inland = valid[us_port]
 
-# 2. Море из Freight1.csv
-ocean_cost = get_ocean_cost(dest, best_us_port, fuel_code, freight_raw)
+ocean = get_ocean_fee(dest, us_port, fuel, is_suv, df_freight)
 
-# 3. Налоги и сборы (из BASE.csv логики)
-auction_fee = bid * 0.12 # Усредненный сбор
-swift = 381
-broker_exp = 850
-customs = (bid * 0.1) + (engine/1000 * 50 * (2025-car_year)) + (bid * 0.2) # Примерная формула
-
-total = bid + auction_fee + inland_cost + ocean_cost + swift + broker_exp + customs
-
-# --- ОТОБРАЖЕНИЕ ---
-c1, c2, c3 = st.columns(3)
-c1.metric("ИТОГО (All In)", f"${total:,.0f}")
-c2.metric("Доставка (Суша + Море)", f"${(inland_cost + ocean_cost):,.0f}")
-c3.metric("Растаможка", f"${customs:,.0f}")
-
+# ВЫВОД РЕЗУЛЬТАТОВ
 st.divider()
-st.subheader("🔍 Детализация маршрута")
-st.write(f"**Аукцион:** {loc} ➔ **Порт США:** {best_us_port} ➔ **Назначение:** {dest}")
+c1, c2, c3 = st.columns(3)
 
-with st.expander("Посмотреть все расходы"):
-    df_res = pd.DataFrame({
-        "Статья": ["Авто", "Аукцион", "Суша (TOW)", "Море (Freight)", "Растаможка", "Прочее"],
-        "Сумма": [bid, auction_fee, inland_cost, ocean_cost, customs, swift + broker_exp]
-    })
-    st.table(df_res)
+with c1:
+    st.metric("Суша (Inland)", f"${inland}")
+    st.caption(f"Через порт: {us_port}")
+
+with c2:
+    if ocean:
+        st.metric("Море (Ocean)", f"${ocean}")
+    else:
+        st.error("Море: Данные не найдены")
+        st.caption("Проверь Freight1.csv")
+
+with c3:
+    # Примерная сумма (можешь добавить свои сборы)
+    total = bid + inland + (ocean if ocean else 0)
+    st.metric("ИТОГО (без растаможки)", f"${total:,.0f}")
+
+# ОТЛАДКА (только если нужно проверить, что видит программа)
+if st.checkbox("Показать таблицу Freight для проверки"):
+    st.write(df_freight)
