@@ -1,63 +1,80 @@
 import streamlit as st
 import pandas as pd
 
-# Попытка импорта с проверкой
-try:
-    from streamlit_gsheets import GSheetsConnection
-    HAS_GSHEETS = True
-except ImportError:
-    HAS_GSHEETS = False
-
+# Настройка страницы
 st.set_page_config(page_title="Car Calc Live", layout="wide")
+st.title("📊 КАЛЬКУЛЯТОР (LIVE)")
 
-if not HAS_GSHEETS:
-    st.error("⏳ Библиотека еще устанавливается на сервере. Подожди 1-2 минуты и обнови страницу.")
-    st.info("Убедись, что в requirements.txt написано: st-gsheets-connection")
-    st.stop()
+# Твоя ссылка
+GSHEET_URL = "https://docs.google.com/spreadsheets/d/1SY-3dXz5trcG_t9vX1BWKtSAtVmBLHtwYz9bOEQNMso/edit?usp=sharing"
 
-# --- ОСНОВНОЙ КОД ---
-st.title("📊 КАЛЬКУЛЯТОР (LIVE GOOGLE SHEETS)")
-
-spreadsheet_url = "https://docs.google.com/spreadsheets/d/1SY-3dXz5trcG_t9vX1BWKtSAtVmBLHtwYz9bOEQNMso/edit?usp=sharing"
-
-conn = st.connection("gsheets", type=GSheetsConnection)
-
+# Функция для прямого чтения (если gsheets_connection тупит)
 @st.cache_data(ttl=60)
-def load_live_data():
-    # Читаем листы
-    df_t = conn.read(spreadsheet=spreadsheet_url, worksheet="TOW")
-    df_f = conn.read(spreadsheet=spreadsheet_url, worksheet="Freight1", header=None)
+def load_data_direct(url):
+    # Превращаем обычную ссылку в прямую ссылку на скачивание CSV для каждого листа
+    tow_url = url.replace('/edit?usp=sharing', '/gviz/tq?tqx=out:csv&sheet=TOW')
+    freight_url = url.replace('/edit?usp=sharing', '/gviz/tq?tqx=out:csv&sheet=Freight1')
+    
+    df_t = pd.read_csv(tow_url)
+    df_f = pd.read_csv(freight_url, header=None)
     return df_t, df_f
 
 try:
-    df_tow, df_freight = load_live_data()
-    st.success("✅ Данные из Google Таблицы успешно загружены!")
+    df_tow, df_freight = load_data_direct(GSHEET_URL)
+    st.success("✅ Соединение установлено!")
 except Exception as e:
-    st.error(f"❌ Не удалось подключиться к таблице. Проверь, что доступ открыт 'Всем, у кого есть ссылка'.")
+    st.error(f"❌ Ошибка доступа! Убедись, что доступ 'Все, у кого есть ссылка'. Текст ошибки: {e}")
     st.stop()
 
-# --- ДАЛЬШЕ ИДЕТ ТВОЙ ИНТЕРФЕЙС ---
+# --- ВВОД ДАННЫХ ---
 with st.sidebar:
-    st.header("📥 ВВОД ДАННЫХ")
+    st.header("📥 ПАРАМЕТРЫ")
     bid = st.number_input("СТАВКА ($)", value=10000)
-    car_year = st.number_input("ГОД ВЫПУСКА", 2010, 2026, 2022)
-    
-    # Очистка списка локаций от пустых строк
-    loc_list = sorted([str(x) for x in df_tow['Loaction'].unique() if pd.notna(x) and str(x).strip() != ''])
-    loc = st.selectbox("ЛОКАЦИЯ АУКЦИОНА", loc_list)
-    
-    body = st.radio("ТИП КУЗОВА", ["Легковая (Седан)", "SUV / Кроссовер"])
+    loc_list = sorted([str(x) for x in df_tow['Loaction'].unique() if pd.notna(x)])
+    loc = st.selectbox("ЛОКАЦИЯ", loc_list)
+    body = st.radio("КУЗОВ", ["Легковая", "SUV / Кроссовер"])
     fuel = st.selectbox("ТОПЛИВО", ["GAS", "EV", "HYB", "DIESEL"])
-    dest = st.selectbox("ПОРТ НАЗНАЧЕНИЯ", ["Odesa", "Constanta", "Klaipeda"])
+    dest = st.selectbox("ПОРТ", ["Odesa", "Constanta", "Klaipeda"])
 
-# Расчет логики (Суша и Море)
-# ... (тот же код расчета, что был выше) ...
+# --- ЛОГИКА ---
+# Ищем цену суши
+row = df_tow[df_tow['Loaction'] == loc].iloc[0]
+valid_ports = {p: float(str(row[p]).replace('$','').replace(',','')) for p in ['NJ','GA','TX','CA','WA'] if pd.notna(row[p]) and str(row[p]).replace('.','').isdigit()}
 
-# ВЫВОД РЕЗУЛЬТАТОВ
-st.divider()
-total_delivery = 0 # Тут будет сумма inland + ocean
-# (Блок отображения метрик)
+if valid_ports:
+    us_port = min(valid_ports, key=valid_ports.get)
+    inland = valid_ports[us_port]
+    
+    # Ищем море
+    ocean = 0
+    try:
+        s_idx = df_freight[df_freight[0].str.contains(dest, case=False, na=False)].index[0]
+        target = fuel if "Легковая" in body else f"{fuel} SUV"
+        # Ищем колонку порта
+        header = df_freight.iloc[s_idx].tolist()
+        c_idx = -1
+        for i, h in enumerate(header):
+            if str(h).strip().upper() == us_port:
+                c_idx = i; break
+        
+        if c_idx != -1:
+            for k in range(s_idx + 1, s_idx + 20):
+                if target in str(df_freight.iloc[k, 0]).upper():
+                    ocean = float(str(df_freight.iloc[k, c_idx]).replace('$','').replace(',',''))
+                    break
+    except: pass
 
-if st.button("🔄 ОБНОВИТЬ ДАННЫЕ ИЗ ТАБЛИЦЫ"):
+    # --- ВЫВОД ---
+    st.divider()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("ПОРТ США", us_port)
+    c2.metric("СУША", f"${inland}")
+    c3.metric("МОРЕ", f"${ocean}")
+    
+    st.header(f"💰 ИТОГО ДОСТАВКА: ${inland + ocean}")
+else:
+    st.warning("Нет цен для этой локации")
+
+if st.button("🔄 ОБНОВИТЬ"):
     st.cache_data.clear()
     st.rerun()
