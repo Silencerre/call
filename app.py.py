@@ -1,95 +1,94 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Car Calc Live", layout="wide")
-st.title("🚗 ВАШ КАЛЬКУЛЯТОР (LIVE ИЗ ТАБЛИЦЫ)")
+st.set_page_config(page_title="Car Calc", layout="wide")
+st.title("🚗 ИНТЕРФЕЙС КАЛЬКУЛЯТОР (ДАННЫЕ ИЗ GOOGLE)")
 
 # Ссылка на твою таблицу
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1SY-3dXz5trcG_t9vX1BWKtSAtVmBLHtwYz9bOEQNMso/edit?usp=sharing"
 
 @st.cache_data(ttl=5)
-def load_full_data(url):
+def load_sheets(url):
     base = url.split('/edit')[0]
-    # Загружаем листы целиком
-    tow_url = f"{base}/gviz/tq?tqx=out:csv&sheet=TOW"
-    freight_url = f"{base}/gviz/tq?tqx=out:csv&sheet=Freight1"
-    return pd.read_csv(tow_url), pd.read_csv(freight_url, header=None)
+    # Читаем листы как есть, со всеми результатами формул
+    df_tow = pd.read_csv(f"{base}/gviz/tq?tqx=out:csv&sheet=TOW")
+    df_freight = pd.read_csv(f"{base}/gviz/tq?tqx=out:csv&sheet=Freight1", header=None)
+    return df_tow, df_freight
 
 try:
-    df_t, df_f = load_full_data(GSHEET_URL)
-    st.success("✅ Соединение с таблицей установлено. Считаю по вашим формулам.")
+    df_t, df_f = load_sheets(GSHEET_URL)
 except:
-    st.error("❌ Ошибка доступа к Google Sheets")
+    st.error("Ошибка связи. Проверь интернет и доступ к таблице.")
     st.stop()
 
-# --- ИНТЕРФЕЙС (ТОЛЬКО ВВОД) ---
+# --- ТВОЙ ИНТЕРФЕЙС ---
 with st.sidebar:
-    st.header("📥 ВВОД ДАННЫХ")
-    
-    # 1. Выбор локации (берем из TOW)
+    st.header("📥 ВВОД")
+    # Локация из колонки Loaction
     loc_list = sorted([str(x).strip() for x in df_t['Loaction'].unique() if pd.notna(x)])
-    user_loc = st.selectbox("Локация аукциона", loc_list)
+    u_loc = st.selectbox("ЛОКАЦИЯ", loc_list)
     
-    # 2. Параметры для фильтрации
-    user_body = st.radio("Тип кузова", ["Легковая", "SUV"])
-    user_fuel = st.selectbox("Топливо", ["GAS", "EV", "HYB", "DIESEL"])
-    user_dest = st.selectbox("Порт назначения", ["Odesa", "Constanta", "Klaipeda"])
+    u_body = st.radio("КУЗОВ", ["Легковая", "SUV"])
+    u_fuel = st.selectbox("ТОПЛИВО", ["GAS", "EV", "HYB", "DIESEL"])
+    u_dest = st.selectbox("ПОРТ ПРИБЫТИЯ", ["Odesa", "Constanta", "Klaipeda"])
 
-# --- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ (БЕРЕМ ТОЛЬКО ГОТОВЫЕ ЦИФРЫ) ---
+# --- ПРОСТОЙ ПОИСК ЦИФРЫ В ТАБЛИЦЕ ---
+inland_price = 0
+port_usa = "NJ"
+ocean_price = 0
 
-# Вычисляем, какой порт США выбрала твоя таблица (самый дешевый)
-row_t = df_t[df_t['Loaction'].str.strip() == user_loc].iloc[0]
-costs = {}
-for p in ['NJ','GA','TX','CA','WA']:
-    v = str(row_t.get(p, '')).replace('$','').replace(',','').strip()
-    if v.replace('.','',1).isdigit(): costs[p] = float(v)
+# 1. Тянем сушу из TOW
+row_t = df_t[df_t['Loaction'].str.strip() == u_loc].iloc[0]
+possible_ports = ['NJ','GA','TX','CA','WA']
+vals = {}
+for p in possible_ports:
+    raw = str(row_t.get(p, '0')).replace('$','').replace(',','').strip()
+    if raw.replace('.','',1).isdigit():
+        vals[p] = float(raw)
 
-selected_port = min(costs, key=costs.get) if costs else "NJ"
-inland_val = costs[selected_port] if costs else 0
+if vals:
+    port_usa = min(vals, key=vals.get) # Самый дешевый порт
+    inland_price = vals[port_usa]
 
-# Ищем итоговую ячейку МОРЯ на листе Freight1
-ocean_val = 0
+# 2. Тянем море из Freight1 (строго по координатам)
 try:
-    f_df = df_f.fillna('').astype(str)
-    # Находим строку с портом (Odesa и т.д.)
-    s_idx = f_df[f_df[0].str.strip().str.upper() == user_dest.upper()].index[0]
-    # Находим колонку порта США в этой же строке
-    header_row = f_df.iloc[s_idx].str.strip().str.upper().tolist()
-    c_idx = header_row.index(selected_port.upper())
+    # Чистим Freight от мусора для поиска
+    f_clean = df_f.fillna('').astype(str).apply(lambda x: x.str.strip().str.upper())
     
-    # Ищем строку с нужным топливом ниже
-    target_text = user_fuel.upper() if user_body == "Легковая" else f"{user_fuel.upper()} SUV"
+    # Ищем строку порта (ODESA / CONSTANTA)
+    s_idx = f_clean[f_clean[0] == u_dest.upper()].index[0]
+    
+    # Ищем колонку порта США (NJ / CA / TX) в этой же строке
+    header = f_clean.iloc[s_idx].tolist()
+    c_idx = header.index(port_usa.upper())
+    
+    # Ищем строку топлива под портом
+    target = u_fuel.upper() if u_body == "Легковая" else f"{u_fuel.upper()} SUV"
     for k in range(s_idx + 1, s_idx + 30):
-        if f_df.iloc[k, 0].strip().upper() == target_text:
-            raw_price = f_df.iloc[k, c_idx].replace('$','').replace(',','').strip()
-            if raw_price.replace('.','',1).isdigit():
-                ocean_val = float(raw_price)
+        if f_clean.iloc[k, 0] == target:
+            res = df_f.iloc[k, c_idx]
+            ocean_price = float(str(res).replace('$','').replace(',','').strip())
             break
 except:
-    pass
+    ocean_price = 0
 
-# --- ФИНАЛЬНЫЙ ЭКРАН ---
+# --- ВЫВОД НА ЭКРАН ---
 st.divider()
-c1, c2, c3 = st.columns(3)
+col1, col2 = st.columns(2)
 
-with c1:
-    st.subheader("📍 МАРШРУТ")
-    st.info(f"{user_loc} ➔ {selected_port}")
+with col1:
+    st.metric("СУША (TOW)", f"${inland_price:,.0f}")
+    st.caption(f"Маршрут: {u_loc} -> {port_usa}")
 
-with c2:
-    st.subheader("🚛 СУША")
-    st.metric(label="Цена из TOW", value=f"${inland_val:,.0f}")
-
-with c3:
-    st.subheader("🚢 МОРЕ")
-    if ocean_val > 0:
-        st.metric(label=f"До {user_dest}", value=f"${ocean_val:,.0f}")
+with col2:
+    if ocean_price > 0:
+        st.metric("МОРЕ (FREIGHT)", f"${ocean_price:,.0f}")
     else:
-        st.error("Нет цены в таблице")
+        st.error("МОРЕ: Нет данных")
 
 st.divider()
-st.success(f"### 💰 ИТОГО ДОСТАВКА (РЕЗУЛЬТАТ ТАБЛИЦЫ): ${inland_val + ocean_val:,.0f}")
+st.header(f"💰 ИТОГО: ${inland_price + ocean_price:,.0f}")
 
-if st.button("🔄 ОБНОВИТЬ ЦЕНЫ ИЗ ГУГЛ ТАБЛИЦЫ"):
+if st.button("🔄 ОБНОВИТЬ ИЗ GOOGLE"):
     st.cache_data.clear()
     st.rerun()
