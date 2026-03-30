@@ -1,94 +1,78 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 
-st.set_page_config(page_title="Car Calc", layout="wide")
-st.title("🚗 ИНТЕРФЕЙС КАЛЬКУЛЯТОР (ДАННЫЕ ИЗ GOOGLE)")
+# --- 1. КРАСИВАЯ ОБОЛОЧКА ---
+st.set_page_config(page_title="Car Calc Premium", layout="wide")
 
-# Ссылка на твою таблицу
-GSHEET_URL = "https://docs.google.com/spreadsheets/d/1SY-3dXz5trcG_t9vX1BWKtSAtVmBLHtwYz9bOEQNMso/edit?usp=sharing"
+st.markdown("""
+    <style>
+    [data-testid="stMetricValue"] { font-size: 40px; color: #00FFCC; }
+    .stNumberInput, .stSelectbox { border-radius: 10px; }
+    .main-box { background: #1E1E1E; padding: 25px; border-radius: 15px; border: 1px solid #333; }
+    </style>
+    """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=5)
-def load_sheets(url):
-    base = url.split('/edit')[0]
-    # Читаем листы как есть, со всеми результатами формул
-    df_tow = pd.read_csv(f"{base}/gviz/tq?tqx=out:csv&sheet=TOW")
-    df_freight = pd.read_csv(f"{base}/gviz/tq?tqx=out:csv&sheet=Freight1", header=None)
-    return df_tow, df_freight
+# --- 2. ПОДКЛЮЧЕНИЕ (Убедись, что JSON ключи в Secrets!) ---
+def get_sheet():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+    client = gspread.authorize(creds)
+    # Открываем твою таблицу
+    return client.open_by_key("1SY-3dXz5trcG_t9vX1BWKtSAtVmBLHtwYz9bOEQNMso").sheet1
 
 try:
-    df_t, df_f = load_sheets(GSHEET_URL)
-except:
-    st.error("Ошибка связи. Проверь интернет и доступ к таблице.")
+    ws = get_sheet()
+except Exception as e:
+    st.error("Настрой Service Account в Secrets!")
     st.stop()
 
-# --- ТВОЙ ИНТЕРФЕЙС ---
-with st.sidebar:
-    st.header("📥 ВВОД")
-    # Локация из колонки Loaction
-    loc_list = sorted([str(x).strip() for x in df_t['Loaction'].unique() if pd.notna(x)])
-    u_loc = st.selectbox("ЛОКАЦИЯ", loc_list)
+# --- 3. ИНТЕРФЕЙС КАК В ТАБЛИЦЕ ---
+st.title("💎 CAR CALCULATOR INTERFACE")
+
+with st.container():
+    st.markdown('<div class="main-box">', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
     
-    u_body = st.radio("КУЗОВ", ["Легковая", "SUV"])
-    u_fuel = st.selectbox("ТОПЛИВО", ["GAS", "EV", "HYB", "DIESEL"])
-    u_dest = st.selectbox("ПОРТ ПРИБЫТИЯ", ["Odesa", "Constanta", "Klaipeda"])
+    with c1:
+        bid = st.number_input("💵 СТАВКА ($)", value=1000, step=100)
+        auction = st.selectbox("🏗️ АУКЦИОН", ["IAAI", "COPART"])
+    with c2:
+        loc = st.text_input("📍 ЛОКАЦИЯ", "ACE - Carson (CA)")
+        model = st.text_input("🚗 МОДЕЛЬ", "2023")
+    with c3:
+        dest = st.selectbox("🚢 ПОРТ", ["Odesa", "Constanta", "Klaipeda"])
+        fuel = st.selectbox("⛽ ТОПЛИВО", ["GAS", "EV", "HYB", "DIESEL"])
+    with c4:
+        body = st.selectbox("📦 КУЗОВ", ["SUV", "Седан"])
+        vin = st.text_input("🔢 VIN (последние 4)", "0001")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# --- ПРОСТОЙ ПОИСК ЦИФРЫ В ТАБЛИЦЕ ---
-inland_price = 0
-port_usa = "NJ"
-ocean_price = 0
+# --- 4. КНОПКА РАСЧЕТА ---
+if st.button("🔄 ПОСЧИТАТЬ В ТАБЛИЦЕ"):
+    with st.spinner('Записываю данные в Google Sheets...'):
+        # ПИШЕМ ДАННЫЕ В ТВОИ ЯЧЕЙКИ (На основе твоего скрина)
+        # B5 - Ставка, B4 - Локация, D4 - Порт, E4 - Кузов, F4 - Топливо
+        updates = [
+            {'range': 'B5', 'values': [[bid]]},
+            {'range': 'B4', 'values': [[loc]]},
+            {'range': 'D4', 'values': [[dest]]},
+            {'range': 'E4', 'values': [[body]]},
+            {'range': 'F4', 'values': [[fuel]]}
+        ]
+        ws.batch_update(updates)
+        
+        # ЧИТАЕМ ГОТОВЫЕ РЕЗУЛЬТАТЫ (Которые твоя таблица уже посчитала)
+        # Допустим: E3 - ALL IN (Итог), B6 - Сбор, B12 - Транспорт, B15 - Мыто
+        all_in = ws.acell('E3').value
+        transport = ws.acell('B12').value
+        customs = ws.acell('B15').value
 
-# 1. Тянем сушу из TOW
-row_t = df_t[df_t['Loaction'].str.strip() == u_loc].iloc[0]
-possible_ports = ['NJ','GA','TX','CA','WA']
-vals = {}
-for p in possible_ports:
-    raw = str(row_t.get(p, '0')).replace('$','').replace(',','').strip()
-    if raw.replace('.','',1).isdigit():
-        vals[p] = float(raw)
-
-if vals:
-    port_usa = min(vals, key=vals.get) # Самый дешевый порт
-    inland_price = vals[port_usa]
-
-# 2. Тянем море из Freight1 (строго по координатам)
-try:
-    # Чистим Freight от мусора для поиска
-    f_clean = df_f.fillna('').astype(str).apply(lambda x: x.str.strip().str.upper())
+    st.divider()
+    res1, res2, res3 = st.columns(3)
+    res1.metric("ТРАНСПОРТ", transport)
+    res2.metric("ТАМОЖНЯ", customs)
+    res3.metric("ALL IN (ИТОГО)", all_in)
     
-    # Ищем строку порта (ODESA / CONSTANTA)
-    s_idx = f_clean[f_clean[0] == u_dest.upper()].index[0]
-    
-    # Ищем колонку порта США (NJ / CA / TX) в этой же строке
-    header = f_clean.iloc[s_idx].tolist()
-    c_idx = header.index(port_usa.upper())
-    
-    # Ищем строку топлива под портом
-    target = u_fuel.upper() if u_body == "Легковая" else f"{u_fuel.upper()} SUV"
-    for k in range(s_idx + 1, s_idx + 30):
-        if f_clean.iloc[k, 0] == target:
-            res = df_f.iloc[k, c_idx]
-            ocean_price = float(str(res).replace('$','').replace(',','').strip())
-            break
-except:
-    ocean_price = 0
-
-# --- ВЫВОД НА ЭКРАН ---
-st.divider()
-col1, col2 = st.columns(2)
-
-with col1:
-    st.metric("СУША (TOW)", f"${inland_price:,.0f}")
-    st.caption(f"Маршрут: {u_loc} -> {port_usa}")
-
-with col2:
-    if ocean_price > 0:
-        st.metric("МОРЕ (FREIGHT)", f"${ocean_price:,.0f}")
-    else:
-        st.error("МОРЕ: Нет данных")
-
-st.divider()
-st.header(f"💰 ИТОГО: ${inland_price + ocean_price:,.0f}")
-
-if st.button("🔄 ОБНОВИТЬ ИЗ GOOGLE"):
-    st.cache_data.clear()
-    st.rerun()
+    st.balloons()
